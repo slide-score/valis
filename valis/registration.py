@@ -2474,6 +2474,10 @@ class Valis(object):
 
         for i, slide_f in enumerate(self.original_img_list):
             slide_name = valtils.get_name(slide_f)
+            slide_reader_cls = None
+            slide_reader = None
+            slide_reader_kwargs = {}
+            
             if slide_name not in named_reader_dict:
                 if default_reader is None:
                     try:
@@ -2504,8 +2508,13 @@ class Valis(object):
                     slide_reader = slide_reader_info
                     slide_reader_kwargs = {}
             
-            # Skip if no reader class was found
-            if slide_reader_cls is None:
+            # Skip if no reader class was found and no reader instance was provided
+            if slide_reader_cls is None and slide_reader is None:
+                continue
+            
+            # If reader instance was already provided, skip instantiation
+            if slide_reader is not None:
+                named_reader_dict[slide_name] = slide_reader
                 continue
                 
             try:
