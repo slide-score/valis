@@ -29,6 +29,17 @@ from tqdm import tqdm
 import scyjava
 from difflib import get_close_matches
 import traceback
+import requests
+import math
+import cv2
+
+# Optional import for SlideScore SDK
+try:
+    import slidescore
+    SLIDESCORE_AVAILABLE = True
+except ImportError:
+    SLIDESCORE_AVAILABLE = False
+    slidescore = None
 
 from colorama import Fore
 from . import valtils
@@ -2869,6 +2880,381 @@ class ImageReader(SlideReader):
         else:
             channel_names = pil_img.getbands()
         return channel_names
+
+
+class SlideScoreSlideReader(SlideReader):
+    """Read slides from SlideScore using tile fetching
+    
+    Minimal implementation based on fetch_tiles.py working example.
+    Core functions: fetch_tiles and stitch_tiles.
+    """
+    
+    def __init__(self, src_f, slidescore_client=None, study_id=None, image_id=None, 
+                 use_tiles=True, temp_dir=None, slidescore_host=None, *args, **kwargs):
+        if not SLIDESCORE_AVAILABLE:
+            raise ImportError("SlideScore-python-sdk is not installed")
+        
+        # Parse slidescore:// URL if provided
+        if isinstance(src_f, str) and src_f.startswith("slidescore://"):
+            parts = src_f.replace("slidescore://", "").split("/")
+            if len(parts) >= 2:
+                study_id = int(parts[0])
+                image_id = int(parts[1])
+        
+        if slidescore_client is None or study_id is None or image_id is None:
+            raise ValueError("slidescore_client, study_id, and image_id must be provided")
+        
+        self.slidescore_client = slidescore_client
+        self.study_id = study_id
+        self.image_id = image_id
+        self.use_tiles = use_tiles
+        self.temp_dir = temp_dir
+        
+        # Store host URL (same as fetch_tiles.py)
+        if slidescore_host is None:
+            end_point = self.slidescore_client.end_point
+            if end_point.endswith("/Api/"):
+                self.slidescore_host = end_point[:-5]
+            else:
+                self.slidescore_host = end_point.replace("/Api/", "").rstrip('/')
+        else:
+            self.slidescore_host = slidescore_host.rstrip('/')
+        
+        # Cache for metadata and auth
+        self._img_metadata = None
+        self._img_auth = None
+        
+        super().__init__(src_f=src_f, *args, **kwargs)
+        self.metadata = self.create_metadata()
+    
+    def _get_image_metadata(self):
+        """Fetch image metadata (same as fetch_tiles.py)"""
+        if self._img_metadata is None:
+            response = self.slidescore_client.perform_request(
+                "GetImageMetadata", 
+                {"imageid": self.image_id}, 
+                method="GET"
+            )
+            self._img_metadata = response.json()["metadata"]
+        return self._img_metadata
+    
+    def _get_image_auth(self):
+        """Get tile server auth (same as fetch_tiles.py)"""
+        if self._img_auth is None:
+            response = self.slidescore_client.perform_request(
+                "GetTileServer", 
+                {"imageid": self.image_id}, 
+                method="GET"
+            )
+            self._img_auth = response.json()
+        return self._img_auth
+    
+    def _fetch_tile(self, level, col, row):
+        """Fetch a single tile (exact same as fetch_tiles.py line 8-13)"""
+        img_auth = self._get_image_auth()
+        url = f'{self.slidescore_host}/i/{self.image_id}/{img_auth["urlPart"]}/i_files/{level}/{col}_{row}.jpeg'
+        response = requests.get(url, cookies={"t": img_auth["cookiePart"]})
+        response.raise_for_status()  # Same as fetch_tiles.py - raises on error
+        return response.content
+    
+    def fetch_tiles(self, level, tile_col_start, tile_col_end, tile_row_start, tile_row_end):
+        """Fetch tiles in a grid (based on fetch_tiles.py lines 51-79)"""
+        img_meta = self._get_image_metadata()
+        tile_size = img_meta.get("osdTileSize", 256)
+        
+        tiles = []
+        for row_idx in range(tile_row_start, tile_row_end):
+            tile_row = []
+            tile_heights = []
+            
+            for col_idx in range(tile_col_start, tile_col_end):
+                try:
+                    tile_bytes = self._fetch_tile(level, col_idx, row_idx)
+                    jpeg_as_np = np.frombuffer(tile_bytes, dtype=np.uint8)
+                    tile_img = cv2.imdecode(jpeg_as_np, flags=1)
+                    if tile_img is not None:
+                        tile_row.append(tile_img)
+                        tile_heights.append(tile_img.shape[0])
+                    else:
+                        blank_tile = np.zeros((tile_size, tile_size, 3), dtype=np.uint8)
+                        tile_row.append(blank_tile)
+                        tile_heights.append(tile_size)
+                        valtils.print_warning(f"Failed to decode tile ({col_idx}, {row_idx})")
+                except Exception as e:
+                    blank_tile = np.zeros((tile_size, tile_size, 3), dtype=np.uint8)
+                    tile_row.append(blank_tile)
+                    tile_heights.append(tile_size)
+                    valtils.print_warning(f"Error fetching tile ({col_idx}, {row_idx}): {e}")
+            
+            tiles.append((tile_row, tile_heights))
+        
+        return tiles
+    
+    def stitch_tiles(self, tiles):
+        """Stitch tiles together (exact same as fetch_tiles.py lines 81-94)"""
+        stitched_rows = []
+        
+        for tile_row, tile_heights in tiles:
+            if tile_row:
+                if tile_heights:
+                    max_height = max(tile_heights)
+                    resized_row = []
+                    for tile in tile_row:
+                        if tile.shape[0] != max_height:
+                            tile = cv2.resize(tile, (tile.shape[1], max_height), interpolation=cv2.INTER_LINEAR)
+                        resized_row.append(tile)
+                    stitched_rows.append(np.hstack(resized_row))
+                else:
+                    stitched_rows.append(np.hstack(tile_row))
+        
+        if not stitched_rows:
+            raise ValueError("No tiles to stitch")
+        
+        return np.vstack(stitched_rows)
+    
+    def create_metadata(self):
+        """Create metadata from SlideScore image metadata"""
+        server = "slidescore"
+        meta_name = f"SlideScore_Study{self.study_id}_Image{self.image_id}"
+        
+        slide_meta = MetaData(meta_name, server)
+        
+        # Get image metadata
+        img_meta = self._get_image_metadata()
+        
+        # Extract dimensions
+        img_width = img_meta.get("level0Width", 0)
+        img_height = img_meta.get("level0Height", 0)
+        tile_size = img_meta.get("osdTileSize", 256)
+        
+        if img_width == 0 or img_height == 0:
+            # If metadata doesn't have dimensions, try downloading and reading
+            if self.use_tiles:
+                # Try to get a tile to determine if RGB
+                # Use a high level (zoomed out) to get a sample tile
+                try:
+                    # Try level 10 as a reasonable zoomed-out level
+                    tile_bytes = self._fetch_tile(level=10, col=0, row=0)
+                    jpeg_as_np = np.frombuffer(tile_bytes, dtype=np.uint8)
+                    img = cv2.imdecode(jpeg_as_np, flags=1)
+                    if img is not None:
+                        # Estimate full dimensions (this is approximate)
+                        tile_h, tile_w = img.shape[:2]
+                        # Rough estimate: assume we got a tile from a reasonable level
+                        # This is just to get channel info, not exact dimensions
+                        slide_meta.is_rgb = len(img.shape) == 3 and img.shape[2] == 3
+                        slide_meta.n_channels = img.shape[2] if len(img.shape) == 3 else 1
+                        # Set default dimensions if not available
+                        img_width = img_width if img_width > 0 else 10000
+                        img_height = img_height if img_height > 0 else 10000
+                except Exception as e:
+                    valtils.print_warning(f"Could not fetch tile to determine dimensions: {e}")
+                    # Defaults
+                    img_width = 10000
+                    img_height = 10000
+                    slide_meta.is_rgb = True
+                    slide_meta.n_channels = 3
+            else:
+                # Download and read with PIL
+                slide_path = self._download_slide()
+                pil_img = Image.open(slide_path)
+                img_width, img_height = pil_img.size
+                slide_meta.is_rgb = self._check_rgb(pil_img)
+                slide_meta.n_channels = self._get_n_channels(pil_img)
+                pil_img.close()
+        else:
+            # Assume RGB if dimensions are available but channel info is not
+            slide_meta.is_rgb = True
+            slide_meta.n_channels = 3
+        
+        # Calculate pyramid levels
+        # SlideScore uses: level 0 = lowest res, max_level = highest res
+        # VALIS uses: level 0 = highest res, higher levels = lower res
+        # So we need to map VALIS levels to SlideScore levels
+        max_level = math.ceil(math.log2(max(img_width, img_height))) if img_width > 0 and img_height > 0 else 10
+        num_levels = max_level + 1
+        
+        # Create slide dimensions for each level
+        # VALIS level 0 = highest res = SlideScore level max_level
+        slide_dimensions = []
+        for valis_level in range(num_levels):
+            # Map VALIS level to SlideScore level
+            slidescore_level = max_level - valis_level
+            scale = 2 ** valis_level
+            level_width = img_width // scale
+            level_height = img_height // scale
+            slide_dimensions.append([level_width, level_height])
+        
+        slide_meta.slide_dimensions = np.array(slide_dimensions)
+        slide_meta.pixel_physical_size_xyu = [1, 1, PIXEL_UNIT]  # Default, can be updated if available
+        slide_meta.channel_names = None if slide_meta.is_rgb else [f"Channel_{i}" for i in range(slide_meta.n_channels)]
+        
+        return slide_meta
+    
+    def slide2image(self, level=0, xywh=None, *args, **kwargs):
+        """Convert slide to numpy image array
+        
+        Parameters
+        ----------
+        level : int
+            Pyramid level (0 is highest resolution)
+        
+        xywh : tuple, optional
+            Region to extract (x, y, width, height)
+        
+        Returns
+        -------
+        img : ndarray
+            Image array
+        """
+        if self.use_tiles:
+            return self._slide2image_from_tiles(level, xywh)
+        else:
+            return self._slide2image_from_file(level, xywh)
+    
+    def _slide2image_from_file(self, level, xywh):
+        """Read image from downloaded file"""
+        slide_path = self._download_slide()
+        
+        # Use VipsSlideReader or ImageReader to read the downloaded file
+        try:
+            # Try using VipsSlideReader first
+            vips_reader = VipsSlideReader(slide_path)
+            img = vips_reader.slide2image(level=level, xywh=xywh)
+        except Exception:
+            # Fall back to ImageReader
+            img_reader = ImageReader(slide_path)
+            img = img_reader.slide2image(xywh=xywh)
+        
+        return img
+    
+    def _slide2image_from_tiles(self, level, xywh):
+        """Read image by fetching tiles from SlideScore image server"""
+        img_meta = self._get_image_metadata()
+        img_auth = self._get_image_auth()
+        
+        img_width = img_meta.get("level0Width", 0)
+        img_height = img_meta.get("level0Height", 0)
+        tile_size = img_meta.get("osdTileSize", 256)
+        
+        if img_width == 0 or img_height == 0:
+            raise ValueError("Image dimensions not available in metadata")
+        
+        # SlideScore level system: level 0 = lowest res, max_level = highest res
+        # VALIS level system: level 0 = highest res, higher levels = lower res
+        max_level = math.ceil(math.log2(max(img_width, img_height)))
+        valis_level = min(level, max_level)
+        
+        # Map VALIS level to SlideScore level
+        # VALIS level 0 (highest res) -> SlideScore level max_level (highest res)
+        # VALIS level N (lower res) -> SlideScore level (max_level - N)
+        slidescore_level = max_level - valis_level
+        slidescore_level = max(0, min(slidescore_level, max_level))
+        
+        # Calculate dimensions at this VALIS level
+        scale = 2 ** valis_level
+        level_width = img_width // scale
+        level_height = img_height // scale
+        
+        # Determine region to fetch (coordinates at VALIS level)
+        if xywh is None:
+            x, y, w, h = 0, 0, level_width, level_height
+        else:
+            x, y, w, h = xywh
+            w = min(w, level_width - x)
+            h = min(h, level_height - y)
+        
+        # Calculate tile indices at SlideScore level
+        # At SlideScore level, we need to scale coordinates
+        slidescore_scale = 2 ** (max_level - slidescore_level)
+        slidescore_x = x * slidescore_scale
+        slidescore_y = y * slidescore_scale
+        slidescore_w = w * slidescore_scale
+        slidescore_h = h * slidescore_scale
+        
+        tile_col_start = slidescore_x // tile_size
+        tile_col_end = math.ceil((slidescore_x + slidescore_w) / tile_size)
+        tile_row_start = slidescore_y // tile_size
+        tile_row_end = math.ceil((slidescore_y + slidescore_h) / tile_size)
+        
+        # Calculate actual tile grid size at this SlideScore level (same as fetch_tiles.py)
+        # This prevents requesting tiles beyond the actual grid
+        level_scale = 2 ** (max_level - slidescore_level)
+        level_width_at_slidescore = img_width // level_scale
+        level_height_at_slidescore = img_height // level_scale
+        max_tile_cols = math.ceil(level_width_at_slidescore / tile_size)
+        max_tile_rows = math.ceil(level_height_at_slidescore / tile_size)
+        
+        # Clamp tile indices to actual grid bounds (same as fetch_tiles.py)
+        tile_col_start = max(0, min(tile_col_start, max_tile_cols - 1))
+        tile_col_end = max(tile_col_start + 1, min(tile_col_end, max_tile_cols))
+        tile_row_start = max(0, min(tile_row_start, max_tile_rows - 1))
+        tile_row_end = max(tile_row_start + 1, min(tile_row_end, max_tile_rows))
+        
+        # Use core functions: fetch_tiles and stitch_tiles
+        tiles = self.fetch_tiles(slidescore_level, tile_col_start, tile_col_end, tile_row_start, tile_row_end)
+        full_img = self.stitch_tiles(tiles)
+        
+        # Crop to requested region at SlideScore level coordinates
+        if xywh is not None:
+            start_c = slidescore_x % tile_size
+            start_r = slidescore_y % tile_size
+            end_c = start_c + slidescore_w
+            end_r = start_r + slidescore_h
+            full_img = full_img[start_r:end_r, start_c:end_c]
+        
+        # Resize to VALIS level dimensions if needed
+        if full_img.shape[0] != h or full_img.shape[1] != w:
+            full_img = cv2.resize(full_img, (w, h), interpolation=cv2.INTER_AREA)
+        
+        # Convert BGR to RGB if needed
+        if len(full_img.shape) == 3 and full_img.shape[2] == 3:
+            full_img = cv2.cvtColor(full_img, cv2.COLOR_BGR2RGB)
+        
+        return full_img
+    
+    def slide2vips(self, level=0, xywh=None, *args, **kwargs):
+        """Convert slide to pyvips.Image
+        
+        Parameters
+        ----------
+        level : int
+            Pyramid level
+        
+        xywh : tuple, optional
+            Region to extract (x, y, width, height)
+        
+        Returns
+        -------
+        vips_img : pyvips.Image
+            Vips image
+        """
+        img = self.slide2image(level=level, xywh=xywh, *args, **kwargs)
+        vips_img = slide_tools.numpy2vips(img)
+        return vips_img
+    
+    def _check_rgb(self, pil_img=None, *args, **kwargs):
+        """Check if image is RGB"""
+        if pil_img is not None:
+            return pil_img.mode == 'RGB'
+        # Use metadata if available
+        if self.metadata is not None:
+            return self.metadata.is_rgb
+        return True  # Default assumption
+    
+    def _get_n_channels(self, pil_img=None, *args, **kwargs):
+        """Get number of channels"""
+        if pil_img is not None:
+            return len(pil_img.getbands())
+        if self.metadata is not None:
+            return self.metadata.n_channels
+        return 3  # Default
+    
+    def _get_channel_names(self, pil_img=None, *args, **kwargs):
+        """Get channel names"""
+        if self.metadata is not None:
+            return self.metadata.channel_names
+        return None
 
 
 def get_slide_reader(src_f, series=None):
