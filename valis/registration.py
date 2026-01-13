@@ -2503,6 +2503,11 @@ class Valis(object):
                     # Provided reader, but no kwargs
                     slide_reader = slide_reader_info
                     slide_reader_kwargs = {}
+            
+            # Skip if no reader class was found
+            if slide_reader_cls is None:
+                continue
+                
             try:
                 slide_reader = slide_reader_cls(src_f=slide_f, **slide_reader_kwargs)
             except Exception as e:

@@ -3290,6 +3290,16 @@ def get_slide_reader(src_f, series=None):
 
 
     src_f = str(src_f)
+    
+    # Check for SlideScore URL scheme
+    if isinstance(src_f, str) and src_f.startswith("slidescore://"):
+        if SLIDESCORE_AVAILABLE:
+            return SlideScoreSlideReader
+        else:
+            msg = f"SlideScore URL detected but SlideScore-python-sdk is not installed: {src_f}"
+            valtils.print_warning(msg, rgb=Fore.RED)
+            return None
+    
     f_extension = slide_tools.get_slide_extension(src_f)
     if f_extension is None:
         msg = f"Unable to find reader to open {os.path.split(src_f)[-1]}"
