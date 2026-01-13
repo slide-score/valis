@@ -3292,9 +3292,16 @@ def get_slide_reader(src_f, series=None):
     src_f = str(src_f)
     
     # Check for SlideScore URL scheme
+    # Note: SlideScoreSlideReader requires slidescore_client, study_id, and image_id
+    # which cannot be auto-detected. These readers must be provided explicitly
+    # in reader_dict when using VALIS registration.
     if isinstance(src_f, str) and src_f.startswith("slidescore://"):
         if SLIDESCORE_AVAILABLE:
-            return SlideScoreSlideReader
+            msg = (f"SlideScore URL detected: {src_f}. "
+                   f"SlideScoreSlideReader requires slidescore_client, study_id, and image_id. "
+                   f"Please provide the reader instance in reader_dict instead of relying on auto-detection.")
+            valtils.print_warning(msg, rgb=Fore.YELLOW)
+            return None
         else:
             msg = f"SlideScore URL detected but SlideScore-python-sdk is not installed: {src_f}"
             valtils.print_warning(msg, rgb=Fore.RED)
