@@ -3131,7 +3131,6 @@ class SlideScoreSlideReader(SlideReader):
     def _slide2image_from_tiles(self, level, xywh):
         """Read image by fetching tiles from SlideScore image server"""
         img_meta = self._get_image_metadata()
-        img_auth = self._get_image_auth()
         
         img_width = img_meta.get("level0Width", 0)
         img_height = img_meta.get("level0Height", 0)
@@ -3161,47 +3160,89 @@ class SlideScoreSlideReader(SlideReader):
             x, y, w, h = 0, 0, level_width, level_height
         else:
             x, y, w, h = xywh
-            w = min(w, level_width - x)
-            h = min(h, level_height - y)
+            w = max(0, min(w, level_width - x))
+            h = max(0, min(h, level_height - y))
+        if w <= 0 or h <= 0:
+            return np.zeros((0, 0, 3), dtype=np.uint8)
         
-        # Calculate tile indices at SlideScore level
-        # At SlideScore level, we need to scale coordinates
-        slidescore_scale = 2 ** (max_level - slidescore_level)
-        slidescore_x = x * slidescore_scale
-        slidescore_y = y * slidescore_scale
-        slidescore_w = w * slidescore_scale
-        slidescore_h = h * slidescore_scale
+        # Coordinates x/y/w/h are already in the requested VALIS level space.
+        # After level mapping, that level space is exactly what SlideScore expects
+        # for tile indexing at `slidescore_level`, so no additional scaling here.
+        slidescore_x = x
+        slidescore_y = y
+        slidescore_w = w
+        slidescore_h = h
         
-        tile_col_start = slidescore_x // tile_size
-        tile_col_end = math.ceil((slidescore_x + slidescore_w) / tile_size)
-        tile_row_start = slidescore_y // tile_size
-        tile_row_end = math.ceil((slidescore_y + slidescore_h) / tile_size)
-        
-        # Calculate actual tile grid size at this SlideScore level (same as fetch_tiles.py)
-        # This prevents requesting tiles beyond the actual grid
+        # Calculate actual level dimensions at this SlideScore level
         level_scale = 2 ** (max_level - slidescore_level)
         level_width_at_slidescore = img_width // level_scale
         level_height_at_slidescore = img_height // level_scale
-        max_tile_cols = math.ceil(level_width_at_slidescore / tile_size)
-        max_tile_rows = math.ceil(level_height_at_slidescore / tile_size)
-        
-        # Clamp tile indices to actual grid bounds (same as fetch_tiles.py)
-        tile_col_start = max(0, min(tile_col_start, max_tile_cols - 1))
-        tile_col_end = max(tile_col_start + 1, min(tile_col_end, max_tile_cols))
-        tile_row_start = max(0, min(tile_row_start, max_tile_rows - 1))
-        tile_row_end = max(tile_row_start + 1, min(tile_row_end, max_tile_rows))
-        
-        # Use core functions: fetch_tiles and stitch_tiles
-        tiles = self.fetch_tiles(slidescore_level, tile_col_start, tile_col_end, tile_row_start, tile_row_end)
-        full_img = self.stitch_tiles(tiles)
-        
-        # Crop to requested region at SlideScore level coordinates
-        if xywh is not None:
-            start_c = slidescore_x % tile_size
-            start_r = slidescore_y % tile_size
-            end_c = start_c + slidescore_w
-            end_r = start_r + slidescore_h
-            full_img = full_img[start_r:end_r, start_c:end_c]
+
+        # Full-image read path (used during registration preprocessing).
+        # Keep this direct and stable to avoid introducing edge-handling behavior
+        # that is only needed for partial region requests.
+        if xywh is None:
+            tile_col_start = 0
+            tile_col_end = max(1, math.ceil(level_width_at_slidescore / tile_size))
+            tile_row_start = 0
+            tile_row_end = max(1, math.ceil(level_height_at_slidescore / tile_size))
+            tiles = self.fetch_tiles(
+                slidescore_level,
+                int(tile_col_start),
+                int(tile_col_end),
+                int(tile_row_start),
+                int(tile_row_end),
+            )
+            full_img = self.stitch_tiles(tiles)
+            full_img = full_img[:int(level_height_at_slidescore), :int(level_width_at_slidescore)]
+            if full_img.shape[0] != h or full_img.shape[1] != w:
+                full_img = cv2.resize(full_img, (w, h), interpolation=cv2.INTER_AREA)
+            if len(full_img.shape) == 3 and full_img.shape[2] == 3:
+                full_img = cv2.cvtColor(full_img, cv2.COLOR_BGR2RGB)
+            return full_img
+
+        req_x0 = int(slidescore_x)
+        req_y0 = int(slidescore_y)
+        req_x1 = int(slidescore_x + slidescore_w)
+        req_y1 = int(slidescore_y + slidescore_h)
+
+        # Intersect with valid level bounds; outside region stays black.
+        clip_x0 = max(0, min(req_x0, level_width_at_slidescore))
+        clip_y0 = max(0, min(req_y0, level_height_at_slidescore))
+        clip_x1 = max(0, min(req_x1, level_width_at_slidescore))
+        clip_y1 = max(0, min(req_y1, level_height_at_slidescore))
+
+        requested_patch = np.zeros((int(slidescore_h), int(slidescore_w), 3), dtype=np.uint8)
+        if clip_x1 > clip_x0 and clip_y1 > clip_y0:
+            tile_col_start = clip_x0 // tile_size
+            tile_col_end = math.ceil(clip_x1 / tile_size)
+            tile_row_start = clip_y0 // tile_size
+            tile_row_end = math.ceil(clip_y1 / tile_size)
+
+            # Use core functions: fetch_tiles and stitch_tiles
+            tiles = self.fetch_tiles(
+                slidescore_level,
+                int(tile_col_start),
+                int(tile_col_end),
+                int(tile_row_start),
+                int(tile_row_end),
+            )
+            full_img = self.stitch_tiles(tiles)
+
+            stitched_x0 = int(tile_col_start * tile_size)
+            stitched_y0 = int(tile_row_start * tile_size)
+            src_x0 = int(clip_x0 - stitched_x0)
+            src_y0 = int(clip_y0 - stitched_y0)
+            src_x1 = src_x0 + int(clip_x1 - clip_x0)
+            src_y1 = src_y0 + int(clip_y1 - clip_y0)
+            clipped_patch = full_img[src_y0:src_y1, src_x0:src_x1]
+
+            dst_x0 = int(clip_x0 - req_x0)
+            dst_y0 = int(clip_y0 - req_y0)
+            dst_x1 = dst_x0 + clipped_patch.shape[1]
+            dst_y1 = dst_y0 + clipped_patch.shape[0]
+            requested_patch[dst_y0:dst_y1, dst_x0:dst_x1] = clipped_patch
+        full_img = requested_patch
         
         # Resize to VALIS level dimensions if needed
         if full_img.shape[0] != h or full_img.shape[1] != w:
