@@ -1,41 +1,41 @@
-"""
-VALIS package - Virtual Alignment of pathoLogy Image Series
+# Namespace package for VALIS - re-export modules from valis.valis
+# This allows imports like "from valis import registration" to work
+__path__ = __import__('pkgutil').extend_path(__path__, __name__)
 
-This package is bundled with the registration package.
-"""
-
-# Make valis.valis modules available at valis.* level
-from valis.valis import (
-    registration,
-    slide_io,
-    affine_optimizer,
-    feature_detectors,
-    feature_matcher,
-    non_rigid_registrars,
-    preprocessing,
-    serial_non_rigid,
-    serial_rigid,
-    slide_tools,
-    valtils,
-    viz,
-    warp_tools,
-    micro_rigid_registrar,
-)
-
-__all__ = [
-    "registration",
-    "slide_io",
-    "affine_optimizer",
-    "feature_detectors",
-    "feature_matcher",
-    "non_rigid_registrars",
-    "preprocessing",
-    "serial_non_rigid",
-    "serial_rigid",
-    "slide_tools",
-    "valtils",
-    "viz",
-    "warp_tools",
-    "micro_rigid_registrar",
-]
-
+# Re-export modules from valis.valis for convenience
+try:
+    from valis.valis import (
+        registration,
+        slide_io,
+        valtils,
+        warp_tools,
+        preprocessing,
+        feature_detectors,
+        feature_matcher,
+        non_rigid_registrars,
+        affine_optimizer,
+        serial_rigid,
+        serial_non_rigid,
+        micro_rigid_registrar,
+        viz,
+        slide_tools,
+    )
+    __all__ = [
+        "registration",
+        "slide_io",
+        "valtils",
+        "warp_tools",
+        "preprocessing",
+        "feature_detectors",
+        "feature_matcher",
+        "non_rigid_registrars",
+        "affine_optimizer",
+        "serial_rigid",
+        "serial_non_rigid",
+        "micro_rigid_registrar",
+        "viz",
+        "slide_tools",
+    ]
+except ImportError:
+    # If valis.valis is not available, just be a namespace package
+    __all__ = []
