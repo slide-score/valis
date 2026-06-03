@@ -2313,8 +2313,17 @@ def collect_img_stats(img_list, norm_percentiles=[1, 5, 95, 99], mask_list=None)
     if use_masks:
         use_masks = mask_list[0] is not None
 
+    def _flatten_for_stats(img, mask):
+        if mask is None:
+            return img.reshape(-1)
+        if img.shape != mask.shape:
+            # Keep behavior simple and robust: if mask shape is inconsistent,
+            # ignore mask for this image instead of failing normalization.
+            return img.reshape(-1)
+        return img[mask > 0]
+
     if use_masks:
-        img0 = img_list[0][mask_list[0] > 0]
+        img0 = _flatten_for_stats(img_list[0], mask_list[0])
     else:
         img0 = img_list[0].reshape(-1)
 
@@ -2330,7 +2339,7 @@ def collect_img_stats(img_list, norm_percentiles=[1, 5, 95, 99], mask_list=None)
             if mask_list[i] is None:
                 img_flat = img.reshape(-1)
             else:
-                img_flat = img[mask_list[i] > 0]
+                img_flat = _flatten_for_stats(img, mask_list[i])
 
         img_hist, _ = np.histogram(img_flat, bins=256)
         all_histogram += img_hist
