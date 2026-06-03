@@ -2474,6 +2474,10 @@ class Valis(object):
 
         for i, slide_f in enumerate(self.original_img_list):
             slide_name = valtils.get_name(slide_f)
+            slide_reader_cls = None
+            slide_reader = None
+            slide_reader_kwargs = {}
+            
             if slide_name not in named_reader_dict:
                 if default_reader is None:
                     try:
@@ -2505,6 +2509,16 @@ class Valis(object):
                     slide_reader = slide_reader_info
                     slide_reader_kwargs = {}
                     slide_reader_cls = None  # Already instantiated, don't try to create again
+
+            # Skip if no reader class was found and no reader instance was provided
+            if slide_reader_cls is None and slide_reader is None:
+                continue
+
+            # If reader instance was already provided, skip instantiation
+            if slide_reader is not None:
+                named_reader_dict[slide_name] = slide_reader
+                continue
+
             try:
                 if slide_reader_cls is not None:
                     slide_reader = slide_reader_cls(src_f=slide_f, **slide_reader_kwargs)
@@ -4766,10 +4780,9 @@ class Valis(object):
             self.error_df = error_df
             self.cleanup()
 
-            pathlib.Path(self.data_dir).mkdir(exist_ok=True,  parents=True)
-            f_out = os.path.join(self.data_dir, self.name + "_registrar.pickle")
-            self.reg_f = f_out
-            pickle.dump(self, open(f_out, 'wb'))
+            from . import registrar_io
+
+            registrar_io.save_registrar_artifacts(self)
 
             data_f_out = os.path.join(self.data_dir, self.name + "_summary.csv")
             error_df.to_csv(data_f_out, index=False)
@@ -5051,7 +5064,9 @@ class Valis(object):
             self.slide_dict[empty_slide_name] = empty_slide
             self.size += 1
 
-        pickle.dump(self, open(self.reg_f, 'wb'))
+        from . import registrar_io
+
+        registrar_io.save_registrar_artifacts(self)
 
         micro_overlap = self.draw_overlap_img(micro_reg_imgs)
         self.micro_reg_overlap_img = micro_overlap
