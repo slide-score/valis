@@ -2522,7 +2522,6 @@ class Valis(object):
             try:
                 if slide_reader_cls is not None:
                     slide_reader = slide_reader_cls(src_f=slide_f, **slide_reader_kwargs)
-                # else: slide_reader is already set above
             except Exception as e:
                 traceback_msg = traceback.format_exc()
                 msg = f"Attempting to read {slide_f} created the following error:\n{e}"
