@@ -19,6 +19,21 @@ META_FILENAME = "meta.json"
 BK_DXDY_FILENAME = "bk_dxdy.bin"
 
 
+def _to_jsonable(obj: Any) -> Any:
+    """Recursively convert numpy scalars/arrays to native Python JSON types."""
+    if isinstance(obj, np.ndarray):
+        return _to_jsonable(obj.tolist())
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, dict):
+        return {str(k): _to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_jsonable(v) for v in obj]
+    return obj
+
+
 def slim_dir_for_pickle(pickle_path: str) -> str:
     """Directory that holds the slim export for a given registrar pickle path."""
     directory, filename = os.path.split(os.path.abspath(pickle_path))
@@ -199,7 +214,7 @@ def export_slim_registrar(valis: Any, pickle_path: str) -> str:
             meta["bk_dxdy_shape"] = None
 
         with open(os.path.join(slide_dir, META_FILENAME), "w", encoding="utf-8") as f:
-            json.dump(meta, f, separators=(",", ":"))
+            json.dump(_to_jsonable(meta), f, separators=(",", ":"))
 
     overlap = _compute_overlap_bboxes(valis, non_rigid=True)
     aligned_shapes = _aligned_shapes_by_level(valis)
@@ -220,7 +235,7 @@ def export_slim_registrar(valis: Any, pickle_path: str) -> str:
     }
     manifest_path = os.path.join(slim_dir, MANIFEST_FILENAME)
     with open(manifest_path, "w", encoding="utf-8") as f:
-        json.dump(manifest, f, separators=(",", ":"))
+        json.dump(_to_jsonable(manifest), f, separators=(",", ":"))
 
     return manifest_path
 
