@@ -4776,10 +4776,9 @@ class Valis(object):
             self.error_df = error_df
             self.cleanup()
 
-            pathlib.Path(self.data_dir).mkdir(exist_ok=True,  parents=True)
-            f_out = os.path.join(self.data_dir, self.name + "_registrar.pickle")
-            self.reg_f = f_out
-            pickle.dump(self, open(f_out, 'wb'))
+            from . import registrar_io
+
+            registrar_io.save_registrar_artifacts(self)
 
             data_f_out = os.path.join(self.data_dir, self.name + "_summary.csv")
             error_df.to_csv(data_f_out, index=False)
@@ -5061,7 +5060,9 @@ class Valis(object):
             self.slide_dict[empty_slide_name] = empty_slide
             self.size += 1
 
-        pickle.dump(self, open(self.reg_f, 'wb'))
+        from . import registrar_io
+
+        registrar_io.save_registrar_artifacts(self)
 
         micro_overlap = self.draw_overlap_img(micro_reg_imgs)
         self.micro_reg_overlap_img = micro_overlap
